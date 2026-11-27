@@ -3,6 +3,8 @@ import type { BudgetTier, CrewRole, Market, Medium, Rival } from './types';
 /** Par de textos [português, inglês]. */
 export type Pair = readonly [string, string];
 
+export const GAME_VERSION = '2.2.0';
+/** Chave do save antigo no localStorage (migrado para o IndexedDB na primeira abertura). */
 export const SAVE_KEY = 'studio_mogul_save_v1';
 export const MODE_KEY = 'studio_mogul_simulation_mode';
 export const AUDIO_KEY = 'studioMogulAudio';

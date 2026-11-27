@@ -15,7 +15,7 @@ export function GameMenu({ onClose }: { onClose: () => void }) {
   const reset = () => {
     if (window.confirm(tr('Deseja reiniciar o estúdio e voltar ao menu inicial?', 'Reset the studio and return to the start menu?'))) {
       onClose();
-      g.resetSave();
+      void g.resetSave();
     }
   };
 
@@ -30,7 +30,7 @@ export function GameMenu({ onClose }: { onClose: () => void }) {
 
       <div className="card">
         <p className="muted" style={{ marginBottom: 10 }}>
-          {tr('O progresso é salvo automaticamente no armazenamento local do navegador a cada semana e ação.', 'Progress is automatically saved in your browser storage every week and after each action.')}
+          {tr('O progresso é salvo automaticamente no banco de dados do navegador (IndexedDB) após cada semana e ação. Um backup é guardado a cada trimestre do jogo, mantendo os três mais recentes.', 'Progress is saved automatically to the browser database (IndexedDB) after each week and action. A backup is kept every in-game quarter, holding the three most recent.')}
         </p>
         <div className="row">
           <button className="green" onClick={() => g.save(true)}>

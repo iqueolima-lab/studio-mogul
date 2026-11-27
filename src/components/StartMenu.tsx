@@ -1,7 +1,7 @@
 import { useState, type CSSProperties } from 'react';
 import { DIFFICULTY_OPTIONS } from '../game/constants';
 import { DIFFICULTY_COPY } from '../game/content';
-import { store } from '../game/store';
+import { useGame } from '../game/store';
 import type { Difficulty } from '../game/types';
 import { money, useLang, type Lang } from '../i18n';
 
@@ -16,10 +16,19 @@ export function LanguageSelect({ style }: { style?: CSSProperties }) {
 }
 
 export function StartMenu({ onStarted }: { onStarted: () => void }) {
+  const store = useGame();
   const { tr, trPair } = useLang();
   const [name, setName] = useState('Apex Pictures');
   const [difficulty, setDifficulty] = useState<Difficulty>('standard');
-  const saved = store.readSaveSummary();
+  const [loading, setLoading] = useState(false);
+  const saved = store.saveSummary;
+
+  const continueGame = async () => {
+    setLoading(true);
+    const ok = await store.loadGame();
+    setLoading(false);
+    if (ok) onStarted();
+  };
   const copy = DIFFICULTY_COPY[difficulty];
   const [title, ...rest] = trPair(copy.summary).split(':');
 
@@ -49,8 +58,8 @@ export function StartMenu({ onStarted }: { onStarted: () => void }) {
                   {saved.studioName} • {saved.year}, {tr('Semana', 'Week')} {saved.week} • {money(saved.cash)}
                 </div>
               </div>
-              <button className="green" onClick={() => store.loadGame() && onStarted()}>
-                {tr('Continuar estúdio', 'Continue studio')}
+              <button className="green" disabled={loading} onClick={() => void continueGame()}>
+                {loading ? tr('Carregando…', 'Loading…') : tr('Continuar estúdio', 'Continue studio')}
               </button>
             </div>
           </div>
@@ -85,6 +94,7 @@ export function StartMenu({ onStarted }: { onStarted: () => void }) {
           </div>
           <button
             style={{ width: '100%', padding: 12, fontSize: '1rem' }}
+            disabled={!store.ready}
             onClick={() => {
               store.newGame(name, difficulty);
               onStarted();

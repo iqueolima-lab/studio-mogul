@@ -4,7 +4,7 @@ A film and TV studio simulator. You found a studio in 1960 with US$ 20 million, 
 
 The game is in Portuguese (Brazil) and English; switch languages from the start menu or the in-game menu.
 
-Built with **React 19 + TypeScript + Vite**. Everything runs in the browser and saves to `localStorage`; there's no backend.
+Built with **React 19 + TypeScript + Vite**. Everything runs in the browser and saves to the browser's IndexedDB database; there's no backend.
 
 ## Requirements
 
@@ -52,7 +52,23 @@ The build uses relative paths (`base: './'`), so you can host `dist/` from any s
    - License series to broadcasters.
    - From 2008 on, launch the StreamVault+ platform (US$ 750M).
 
-Progress saves automatically after every week and action. Saves from the original single-file HTML version (`studio_mogul_save_v1`) load and are migrated automatically.
+## Saving
+
+Progress saves automatically to **IndexedDB** (database `studio-mogul`, object store `saves`):
+
+| Slot | Contents |
+| --- | --- |
+| `autosave` | Latest state. Rapid changes are grouped into one write (~0.8 s); pending changes are flushed when the tab is hidden or closed |
+| `backup-1` … `backup-3` | A checkpoint every in-game quarter (13 weeks); newest first |
+
+- Each save is a versioned envelope: `format`, `schemaVersion`, `gameVersion`, `savedAt`, a `summary` for the start menu, and the `state`. Breaking format changes bump `schemaVersion` and add a step to `MIGRATIONS` in [saveFile.ts](src/game/save/saveFile.ts).
+- Writes run one at a time, in order. The autosave and any backup rotation are written in a single transaction, so a failed write never leaves a half-updated save.
+- If the autosave is unreadable, loading falls back to the newest readable backup.
+- On first launch, a save in the old `localStorage` key `studio_mogul_save_v1` (from earlier builds or the original HTML file) is copied into IndexedDB. The old key is removed only after the copy succeeds.
+- If IndexedDB is unavailable, for example blocked in some private windows, the game runs with in-memory storage and warns that progress won't survive closing the page.
+- Settings (language, simulation mode, sound) stay in `localStorage`.
+
+To inspect saves: DevTools → Application → IndexedDB → `studio-mogul`.
 
 ## Project structure
 
@@ -63,7 +79,12 @@ src/
 │   ├── types.ts           # State, project, talent and event types
 │   ├── constants.ts       # Genres, themes, markets, phases, awards, options
 │   ├── state.ts           # New game creation + save migration (normalizeState)
-│   ├── store.ts           # Central store: mutate → save → re-render, auto-advance timer
+│   ├── store.ts           # Central store: mutate → autosave → re-render, auto-advance timer
+│   ├── save/
+│   │   ├── storage.ts     # SaveStorage interface: IndexedDB + in-memory fallback
+│   │   ├── saveFile.ts    # Versioned save envelope, migrations, validation
+│   │   ├── saveManager.ts # Autosave slot, rotating backups, ordered writes, legacy import
+│   │   └── save.test.ts   # Storage tests (fake-indexeddb)
 │   ├── simulation.ts      # advanceWeek(): the weekly tick, in order
 │   ├── greenlight.ts      # Cost calculation and project creation
 │   ├── release.ts         # Release, weekly box office, series renewal

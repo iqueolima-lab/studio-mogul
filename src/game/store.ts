@@ -1,13 +1,16 @@
 /**
  * Estado central do jogo. A simulação altera o objeto de estado diretamente (como no jogo original);
- * cada alteração passa por `mutate`, que salva no localStorage e avisa a interface para re-renderizar.
+ * cada alteração passa por `mutate`, que agenda um autosave no IndexedDB e avisa a interface.
  */
 import { useSyncExternalStore } from 'react';
 import { MODE_KEY, SAVE_KEY } from './constants';
+import { SaveError, toSaveFile, type SaveSummary } from './save/saveFile';
+import { SaveManager } from './save/saveManager';
+import { MemoryStorage, openStorage } from './save/storage';
 import { advanceWeek } from './simulation';
-import { createNewState, normalizeState } from './state';
+import { createNewState } from './state';
 import type { ActionResult, Difficulty, GameEvent, GameState, SimHooks, SimMode } from './types';
-import { clamp, historicalYear } from './utils';
+import { clamp } from './utils';
 import { playTimeSound } from '../audio/audio';
 import { tr } from '../i18n';
 
@@ -18,16 +21,13 @@ export interface Toast {
   kind: ToastKind;
 }
 
-export interface SaveSummary {
-  studioName: string;
-  year: number;
-  week: number;
-  cash: number;
-}
+export type { SaveSummary };
 
 /** Duração de uma semana no modo Desafio, em milissegundos. */
 const AUTO_WEEK_MS = 15000;
 const TICK_MS = 500;
+/** Agrupa várias alterações seguidas num único autosave. */
+const SAVE_DELAY_MS = 800;
 
 type Listener = () => void;
 
@@ -37,7 +37,13 @@ class Store {
   greenlightOpen = false;
   mode: SimMode = localStorage.getItem(MODE_KEY) === 'auto15' ? 'auto15' : 'manual';
   toasts: Toast[] = [];
+  /** true depois que o armazenamento foi aberto e o resumo do save foi lido. */
+  ready = false;
+  saveSummary: SaveSummary | null = null;
 
+  private saves = new SaveManager(new MemoryStorage());
+  private saveTimer: number | null = null;
+  private saveErrorShown = false;
   private version = 0;
   private listeners = new Set<Listener>();
 
@@ -97,43 +103,72 @@ class Store {
   }
 
   // ---- Persistência ----
-  save(notify = false): void {
-    if (!this.state) return;
+
+  /** Abre o banco, migra o save antigo do localStorage e lê o resumo para o menu inicial. */
+  async init(): Promise<void> {
+    if (this.ready) return;
+    const storage = await openStorage();
+    this.saves = new SaveManager(storage);
+    if (!storage.persistent)
+      this.toast(tr('O navegador bloqueou o armazenamento local: o progresso não será mantido ao fechar a página.', 'The browser blocked local storage: progress will not be kept after closing the page.'), 'error');
     try {
-      localStorage.setItem(SAVE_KEY, JSON.stringify(this.state));
-      if (notify) this.toast(tr('Progresso salvo localmente!', 'Progress saved locally!'), 'success');
+      const legacy = localStorage.getItem(SAVE_KEY);
+      // Só apaga a chave antiga quando o save já está no banco persistente.
+      if (legacy && (await this.saves.importLegacy(legacy)) && storage.persistent) localStorage.removeItem(SAVE_KEY);
     } catch {
-      this.toast(tr('Não foi possível salvar no navegador.', 'Could not save to browser storage.'), 'error');
+      /* mantém a chave antiga para tentar de novo na próxima abertura */
     }
+    this.saveSummary = await this.saves.summary().catch(() => null);
+    this.ready = true;
+    this.emit();
   }
 
-  readSaveSummary(): SaveSummary | null {
+  /** Agenda um autosave; várias alterações seguidas viram uma só gravação. */
+  save(notify = false): void {
+    if (!this.state) return;
+    if (notify) {
+      void this.flush().then((ok) => ok && this.toast(tr('Progresso salvo!', 'Progress saved!'), 'success'));
+      return;
+    }
+    if (this.saveTimer === null) this.saveTimer = window.setTimeout(() => void this.flush(), SAVE_DELAY_MS);
+  }
+
+  /** Grava imediatamente (usado ao sair da página, no "Salvar agora" e ao criar um jogo). */
+  async flush(): Promise<boolean> {
+    if (this.saveTimer !== null) window.clearTimeout(this.saveTimer);
+    this.saveTimer = null;
+    if (!this.state) return true;
     try {
-      const raw = localStorage.getItem(SAVE_KEY);
-      if (!raw) return null;
-      const p = JSON.parse(raw);
-      return { studioName: String(p.studioName ?? ''), year: historicalYear(p), week: Number(p.week) || 1, cash: Number(p.cash) || 0 };
+      this.saveSummary = await this.saves.write(this.state);
+      this.saveErrorShown = false;
+      return true;
     } catch {
-      return null;
+      if (!this.saveErrorShown) this.toast(tr('Não foi possível salvar no navegador.', 'Could not save to browser storage.'), 'error');
+      this.saveErrorShown = true;
+      return false;
     }
   }
 
   newGame(name: string, difficulty: Difficulty): void {
     this.state = createNewState(name.trim() || 'Apex Pictures', difficulty);
     this.pendingEvent = null;
+    this.saves.resetBackupClock();
     this.setMode('manual');
-    this.save();
+    void this.flush();
     this.startLoop();
     this.emit();
   }
 
-  loadGame(): boolean {
+  async loadGame(): Promise<boolean> {
     try {
-      const raw = localStorage.getItem(SAVE_KEY);
-      if (!raw) return false;
-      this.state = normalizeState(JSON.parse(raw));
-    } catch {
-      this.toast(tr('O save salvo está corrompido.', 'The saved game is corrupted.'), 'error');
+      const loaded = await this.saves.load();
+      if (!loaded) return false;
+      this.state = loaded.state;
+      if (loaded.fromBackup)
+        this.toast(tr('O save mais recente estava danificado; o último backup foi carregado.', 'The latest save was damaged; the most recent backup was loaded.'), 'error');
+    } catch (err) {
+      const newer = err instanceof SaveError && err.reason === 'newer';
+      this.toast(newer ? tr('Este save é de uma versão mais nova do jogo.', 'This save comes from a newer version of the game.') : tr('O save salvo está corrompido.', 'The saved game is corrupted.'), 'error');
       return false;
     }
     this.pendingEvent = null;
@@ -144,23 +179,32 @@ class Store {
     return true;
   }
 
+  /** Copia o save completo (envelope versionado) como JSON. */
   async exportSave(): Promise<void> {
     if (!this.state) return;
     try {
-      await navigator.clipboard.writeText(JSON.stringify(this.state));
+      await navigator.clipboard.writeText(JSON.stringify(toSaveFile(this.state)));
       this.toast(tr('Código JSON copiado!', 'JSON save code copied!'), 'success');
     } catch {
       this.toast(tr('Não foi possível copiar para a área de transferência.', 'Could not copy to the clipboard.'), 'error');
     }
   }
 
-  resetSave(): void {
-    localStorage.removeItem(SAVE_KEY);
+  async resetSave(): Promise<void> {
+    if (this.saveTimer !== null) window.clearTimeout(this.saveTimer);
+    this.saveTimer = null;
     this.stopLoop();
     this.state = null;
     this.pendingEvent = null;
     this.greenlightOpen = false;
     this.setProgress(0);
+    try {
+      await this.saves.clear();
+      localStorage.removeItem(SAVE_KEY);
+    } catch {
+      this.toast(tr('Não foi possível apagar o save.', 'Could not delete the save.'), 'error');
+    }
+    this.saveSummary = null;
     this.emit();
   }
 
@@ -198,7 +242,10 @@ class Store {
 
   /** Não acumula tempo de simulação enquanto o app está em segundo plano. */
   handleVisibilityChange(): void {
-    if (document.hidden) this.setProgress(0);
+    if (!document.hidden) return;
+    this.setProgress(0);
+    // A aba pode ser fechada a partir daqui: grava o que estiver pendente.
+    if (this.saveTimer !== null) void this.flush();
   }
 
   // ---- Interface ----

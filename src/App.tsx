@@ -50,9 +50,12 @@ export default function App() {
       if ((e.target as HTMLElement | null)?.closest('button')) playClickSound();
     };
     const onVisibility = () => store.handleVisibilityChange();
+    const onPageHide = () => void store.flush();
     document.addEventListener('click', onClick);
     document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('pagehide', onPageHide);
     return () => {
+      window.removeEventListener('pagehide', onPageHide);
       document.removeEventListener('click', onClick);
       document.removeEventListener('visibilitychange', onVisibility);
     };
